@@ -77,27 +77,26 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app1
+            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app2
             echo "Performing backend health check via public API endpoint..."
             sleep 10
-            # Use a concrete API endpoint that we know exists instead of the API root,
-            # which may return 404 depending on router configuration
-            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APP_BASE_URL }}/api/candidates/ || echo "000")
+
+            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APP_BASE_URL }}/api/ || echo "000")
             echo "Health check HTTP status: $STATUS_CODE"
 
             if [ "$STATUS_CODE" = "200" ] || [ "$STATUS_CODE" = "401" ]; then
-              echo "API endpoint is responding (status $STATUS_CODE)"
+              echo "✅ API endpoint is responding (status $STATUS_CODE)"
             else
-              echo "API endpoint check failed (status $STATUS_CODE)"
+              echo "⚠️  API endpoint check failed (status $STATUS_CODE)"
               docker compose logs backend --tail=50
               exit 1
             fi
 
-            echo "Backend container status:"
+            echo "\nBackend container status:"
             docker compose ps backend
 
-            echo "Recent backend logs:"
+            echo "\nRecent backend logs:"
             docker compose logs backend --tail=20
 
-            echo "Deployment health check completed!"
+            echo "\n🎉 Deployment health check completed!"
             echo "Your application should be accessible at: ${{ env.APP_BASE_URL }}"
