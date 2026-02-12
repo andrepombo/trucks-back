@@ -77,7 +77,7 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app2
+            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app3
             echo "Performing backend health check via public API endpoint..."
             sleep 10
 
