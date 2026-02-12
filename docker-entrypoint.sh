@@ -2,6 +2,7 @@
 set -e
 
 export DJANGO_SETTINGS_MODULE=trucks.settings
+export PATH="/usr/local/bin:$PATH"
 
 echo "Running database migrations..."
 python manage.py migrate --noinput
