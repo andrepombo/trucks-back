@@ -525,6 +525,29 @@ def _estimate_route_states(
         samples.append(m)
         m += step
     samples.append(total)
+    # Cap the total number of samples to avoid excessive reverse geocoding calls
+    try:
+        from django.conf import settings as _dj_settings  # lazy to avoid hard dep at import
+        max_samples_mid = int(getattr(_dj_settings, "ROUTE_STATE_SAMPLE_MAX", 8))
+    except Exception:
+        max_samples_mid = 8
+    # Keep first and last; thin the middle if needed
+    if len(samples) > (max_samples_mid + 2):
+        mid = samples[1:-1]
+        keep = []
+        # Evenly pick at most max_samples_mid points across mid
+        for i in range(1, max_samples_mid + 1):
+            idx = round((i * (len(mid) + 1)) / (max_samples_mid + 1)) - 1
+            idx = max(0, min(idx, len(mid) - 1))
+            keep.append(mid[idx])
+        # De-duplicate while preserving order
+        seen = set()
+        thin_mid = []
+        for v in keep:
+            if v not in seen:
+                thin_mid.append(v)
+                seen.add(v)
+        samples = [samples[0]] + thin_mid + [samples[-1]]
     for d in samples:
         p = interpolate_point_at_distance(coords, cum, d)
         try:

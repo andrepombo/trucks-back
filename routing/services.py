@@ -5,9 +5,27 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from django.conf import settings
 
 logger = logging.getLogger("routing")
+
+_TIME_CONNECT = float(getattr(settings, "HTTP_CONNECT_TIMEOUT", 3.0))
+_TIME_READ = float(getattr(settings, "HTTP_READ_TIMEOUT", 8.0))
+_MAX_RETRIES = int(getattr(settings, "HTTP_MAX_RETRIES", 2))
+
+_session = requests.Session()
+_adapter = HTTPAdapter(
+    max_retries=Retry(
+        total=_MAX_RETRIES,
+        backoff_factor=0.3,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=frozenset(["GET"]),
+    )
+)
+_session.mount("https://", _adapter)
+_session.mount("http://", _adapter)
 
 
 US_STATE_ABBR = {
@@ -66,7 +84,7 @@ US_STATE_ABBR = {
 
 
 def _request_json(url: str, params: Dict[str, str]) -> Dict:
-    r = requests.get(url, params=params, timeout=20)
+    r = _session.get(url, params=params, timeout=(_TIME_CONNECT, _TIME_READ))
     r.raise_for_status()
     return r.json()
 
