@@ -42,7 +42,7 @@ jobs:
           SOURCE: "./"
           REMOTE_HOST: ${{ secrets.VPS_HOST }}
           REMOTE_USER: ${{ secrets.VPS_SSH_USER }}
-          TARGET: '/home/${{ secrets.VPS_SSH_USER }}/apps/app1/backend'
+          TARGET: '/home/${{ secrets.VPS_SSH_USER }}/apps/app3/backend'
           EXCLUDE: "/dist/, /node_modules/, /.git/, /venv/, /__pycache__/, *.pyc"
           SCRIPT_AFTER: |
             echo "Files copied successfully"
