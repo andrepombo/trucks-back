@@ -23,10 +23,12 @@ jobs:
       - name: Create .env file
         env:
           ENV: ${{ secrets.ENV }}
+          GEOAPIFY_API_KEY: ${{ secrets.GEOAPIFY_API_KEY }}
         run: |
           echo "ENV=${ENV}" >> .env
           echo "DEBUG=${{ secrets.DEBUG }}" >> .env
           echo "DEMO_MODE=True" >> .env
+          echo "GEOAPIFY_API_KEY=${GEOAPIFY_API_KEY}" >> .env
           
           # echo "SECRET_KEY=${{ secrets.SECRET_KEY }}" >> .env
           # echo "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}" >> .env
