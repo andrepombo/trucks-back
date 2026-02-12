@@ -58,8 +58,8 @@ jobs:
           username: ${{ secrets.VPS_SSH_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           script: |
-            # Build and start only the backend service from the main app1 stack
-            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app1
+            # Build and start only the backend service from the app3 stack
+            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app3
             
             echo "Building and starting backend container..."
             docker compose up -d --build backend
