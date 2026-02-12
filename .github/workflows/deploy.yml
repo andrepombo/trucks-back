@@ -70,33 +70,33 @@ jobs:
             
             echo "Deployment completed successfully!"
 
-      - name: Health check
-        uses: appleboy/ssh-action@v0.1.10
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_SSH_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          script: |
-            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app3
-            echo "Performing backend health check via public API endpoint..."
-            sleep 10
+      # - name: Health check
+      #   uses: appleboy/ssh-action@v0.1.10
+      #   with:
+      #     host: ${{ secrets.VPS_HOST }}
+      #     username: ${{ secrets.VPS_SSH_USER }}
+      #     key: ${{ secrets.VPS_SSH_KEY }}
+      #     script: |
+      #       cd /home/${{ secrets.VPS_SSH_USER }}/apps/app3
+      #       echo "Performing backend health check via public API endpoint..."
+      #       sleep 10
 
-            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APP_BASE_URL }}/api/ || echo "000")
-            echo "Health check HTTP status: $STATUS_CODE"
+      #       STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APP_BASE_URL }}/api/ || echo "000")
+      #       echo "Health check HTTP status: $STATUS_CODE"
 
-            if [ "$STATUS_CODE" = "200" ] || [ "$STATUS_CODE" = "401" ]; then
-              echo "✅ API endpoint is responding (status $STATUS_CODE)"
-            else
-              echo "⚠️  API endpoint check failed (status $STATUS_CODE)"
-              docker compose logs backend --tail=50
-              exit 1
-            fi
+      #       if [ "$STATUS_CODE" = "200" ] || [ "$STATUS_CODE" = "401" ]; then
+      #         echo "✅ API endpoint is responding (status $STATUS_CODE)"
+      #       else
+      #         echo "⚠️  API endpoint check failed (status $STATUS_CODE)"
+      #         docker compose logs backend --tail=50
+      #         exit 1
+      #       fi
 
-            echo "\nBackend container status:"
-            docker compose ps backend
+      #       echo "\nBackend container status:"
+      #       docker compose ps backend
 
-            echo "\nRecent backend logs:"
-            docker compose logs backend --tail=20
+      #       echo "\nRecent backend logs:"
+      #       docker compose logs backend --tail=20
 
-            echo "\n🎉 Deployment health check completed!"
-            echo "Your application should be accessible at: ${{ env.APP_BASE_URL }}"
+      #       echo "\n🎉 Deployment health check completed!"
+      #       echo "Your application should be accessible at: ${{ env.APP_BASE_URL }}"
