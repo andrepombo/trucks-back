@@ -79,6 +79,9 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # CORS
 CORS_ALLOW_ALL_ORIGINS = True
 
+STATIC_URL = "static/"
+STATIC_ROOT = BASE_DIR / "staticfiles"
+
 # Fuel price data file
 FUEL_PRICE_CSV = os.getenv(
     "FUEL_PRICE_CSV",
