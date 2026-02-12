@@ -1,0 +1,103 @@
+name: Deploy Backend to VPS
+
+on:
+  push:
+    branches: [ main ]
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: true
+
+env:
+  APP_BASE_URL: https://app3.andrepombo.info
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Create .env file
+        env:
+          ENV: ${{ secrets.ENV }}
+        run: |
+          echo "ENV=${ENV}" >> .env
+          echo "DEBUG=${{ secrets.DEBUG }}" >> .env
+          echo "DEMO_MODE=True" >> .env
+          
+          # echo "SECRET_KEY=${{ secrets.SECRET_KEY }}" >> .env
+          # echo "ALLOWED_HOSTS=${{ secrets.ALLOWED_HOSTS }}" >> .env
+          # echo "CORS_ALLOWED_ORIGINS=${{ secrets.CORS_ALLOWED_ORIGINS }}" >> .env
+          # echo "TIME_ZONE=${{ secrets.TIME_ZONE }}" >> .env
+          # echo "LANGUAGE_CODE=${{ secrets.LANGUAGE_CODE }}" >> .env
+
+      - name: Copy files to VPS
+        uses: easingthemes/ssh-deploy@main
+        with:
+          SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_KEY }}
+          ARGS: "-rlgoDzvc -i"
+          SOURCE: "./"
+          REMOTE_HOST: ${{ secrets.VPS_HOST }}
+          REMOTE_USER: ${{ secrets.VPS_SSH_USER }}
+          TARGET: '/home/${{ secrets.VPS_SSH_USER }}/apps/app1/backend'
+          EXCLUDE: "/dist/, /node_modules/, /.git/, /venv/, /__pycache__/, *.pyc"
+          SCRIPT_AFTER: |
+            echo "Files copied successfully"
+            echo "Cleaning up unused Docker resources..."
+            docker system prune -f
+
+      - name: Build and start containers
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            # Build and start only the backend service from the main app1 stack
+            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app1
+            
+            echo "Building and starting backend container..."
+            docker compose up -d --build backend
+            
+            echo "Waiting for services to start..."
+            sleep 30
+            
+            echo "Checking container status for backend..."
+            docker compose ps backend
+            
+            echo "Deployment completed successfully!"
+
+      - name: Health check
+        uses: appleboy/ssh-action@v0.1.10
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_SSH_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /home/${{ secrets.VPS_SSH_USER }}/apps/app1
+            echo "Performing backend health check via public API endpoint..."
+            sleep 10
+            # Use a concrete API endpoint that we know exists instead of the API root,
+            # which may return 404 depending on router configuration
+            STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" ${{ env.APP_BASE_URL }}/api/candidates/ || echo "000")
+            echo "Health check HTTP status: $STATUS_CODE"
+
+            if [ "$STATUS_CODE" = "200" ] || [ "$STATUS_CODE" = "401" ]; then
+              echo "API endpoint is responding (status $STATUS_CODE)"
+            else
+              echo "API endpoint check failed (status $STATUS_CODE)"
+              docker compose logs backend --tail=50
+              exit 1
+            fi
+
+            echo "Backend container status:"
+            docker compose ps backend
+
+            echo "Recent backend logs:"
+            docker compose logs backend --tail=20
+
+            echo "Deployment health check completed!"
+            echo "Your application should be accessible at: ${{ env.APP_BASE_URL }}"
