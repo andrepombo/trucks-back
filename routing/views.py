@@ -167,134 +167,24 @@ def plan_route(request):
             start_empty=bool(body.get("start_empty")),
         )
 
-        # Preserve the original base route (A->B) used for fuel planning
-        base_route = plan.get("route") or {}
-
-        # Build a waypoint list that goes through the selected fuel stops
-        stops = plan.get("stops", [])
-        waypoints = [list(start_ll)]
-        for s in stops:
-            try:
-                lon = float(s.get("lon"))
-                lat = float(s.get("lat"))
-            except (TypeError, ValueError):
-                continue
-            waypoints.append([lon, lat])
-        waypoints.append(list(finish_ll))
-
-        # Ask Geoapify for a true multi‑waypoint route following the chosen stops.
-        # If this fails for any reason, we fall back to the original base route.
-        detour_route = None
-        try:
-            if len(waypoints) >= 2:
-                logger.debug("Requesting Geoapify route with %d waypoints ...", len(waypoints))
-                detour_route = route_directions(waypoints)
-                # Ensure we expose duration in a consistent "duration_seconds" field
-                if isinstance(detour_route, dict):
-                    try:
-                        d_s = float(detour_route.get("duration", 0.0) or 0.0)
-                    except Exception:
-                        d_s = 0.0
-                    detour_route.setdefault("duration_seconds", d_s)
-        except Exception as e:
-            logger.exception("Multi‑waypoint routing failed; falling back to base route: %s", e)
-
-        if isinstance(detour_route, dict):
-            # Expose both versions to the frontend: base_route (original A->B)
-            # and route (actual path via fuel stops).
-            plan["base_route"] = {
-                "distance": float(base_route.get("distance", 0.0) or 0.0),
-                "duration": float(base_route.get("duration", 0.0) or 0.0),
-                "distance_miles": float(base_route.get("distance_miles", 0.0) or 0.0),
-                "duration_seconds": float(base_route.get("duration_seconds", 0.0) or 0.0),
-                "geometry": base_route.get("geometry") or {},
-            }
-            plan["route"] = detour_route
-            route_info = detour_route
-        else:
-            # No alternative route; keep only the base route
-            plan["base_route"] = base_route
-            route_info = base_route
-
         # Add a concise summary to make the response easier to consume.
-        # Use the detour route for total distance if available, and also
-        # approximate the extra detour miles relative to the base route.
+        stops = plan.get("stops", [])
+        route_info = plan.get("route", {})
         fuel_info = plan.get("fuel", {})
+        distance_miles = float(route_info.get("distance_miles", 0.0))
 
-        base_geom = (plan.get("base_route") or {}).get("geometry") or {}
-        route_geom = (plan.get("route") or {}).get("geometry") or {}
-
-        # Total distance of the actual driven route (with stops), if present.
-        detour_total_miles = float(route_info.get("distance_miles", 0.0))
-        if detour_total_miles <= 0.0 and route_geom.get("coordinates"):
-            try:
-                detour_coords = route_geom.get("coordinates") or []
-                if detour_coords and isinstance(detour_coords[0][0], (list, tuple)):
-                    flat_d = []
-                    for line in detour_coords:
-                        if isinstance(line, list):
-                            flat_d.extend([pt for pt in line if isinstance(pt, (list, tuple)) and len(pt) >= 2])
-                    detour_coords = flat_d
-                if len(detour_coords) >= 2:
-                    detour_cum = cumulative_distances_miles(detour_coords)
-                    detour_total_miles = float(detour_cum[-1])
-            except Exception:
-                detour_total_miles = 0.0
-
-        # Total distance of the original base A->B route.
-        base_total_miles = float((plan.get("base_route") or {}).get("distance_miles", 0.0) or 0.0)
-        if base_total_miles <= 0.0 and base_geom.get("coordinates"):
-            try:
-                base_coords = base_geom.get("coordinates") or []
-                if base_coords and isinstance(base_coords[0][0], (list, tuple)):
-                    flat_b = []
-                    for line in base_coords:
-                        if isinstance(line, list):
-                            flat_b.extend([pt for pt in line if isinstance(pt, (list, tuple)) and len(pt) >= 2])
-                    base_coords = flat_b
-                if len(base_coords) >= 2:
-                    base_cum = cumulative_distances_miles(base_coords)
-                    base_total_miles = float(base_cum[-1])
-            except Exception:
-                base_total_miles = 0.0
-
-        # Approximate extra detour miles (red segments) compared to base.
-        detour_extra_miles = 0.0
-        try:
-            if base_geom and route_geom and base_geom is not route_geom:
-                detour_extra_miles = _polyline_extra_detour_miles(base_geom, route_geom)
-        except Exception:
-            detour_extra_miles = 0.0
-
-        # New fuel accounting from SimpleFuelPlanner
         total_fuel_consumed = float(fuel_info.get("total_fuel_consumed", 0.0) or 0.0)
         total_purchased_gallons = float(fuel_info.get("total_purchased_gallons", 0.0) or 0.0)
         trip_fuel_cost = float(fuel_info.get("trip_fuel_cost", 0.0) or 0.0)
         ending_fuel = float(fuel_info.get("ending_fuel_gallons", 0.0) or 0.0)
-        # Use the geometric extra detour miles as the main detour metric.
-        total_detour_miles = float(detour_extra_miles)
-
-        # Effective unique distance according to the user's spec:
-        # distance_miles = green_base_only - shared_blue + red_detour_only.
-        # With:
-        #   base_total_miles ~= green_base_only + shared_blue
-        #   detour_total_miles ~= shared_blue + red_detour_only
-        #   total_detour_miles ~= red_detour_only
-        # We derive:
-        #   distance_miles = base_total_miles - detour_total_miles + 2 * total_detour_miles
-        distance_miles_effective = base_total_miles - detour_total_miles + 2.0 * total_detour_miles
-
-        # The full distance actually driven (with detours) is detour_total_miles.
-        total_distance_with_detours = detour_total_miles
+        total_detour_miles = sum(float(s.get("detour_miles", 0.0) or 0.0) for s in stops)
 
         plan["summary"] = {
             "start": start,
             "finish": finish,
-            # Effective miles as defined above (green - blue + red)
-            "distance_miles": distance_miles_effective,
+            "distance_miles": distance_miles,
             "total_detour_miles": total_detour_miles,
-            # Total miles actually driven following the multi-waypoint route
-            "distance_with_detours_miles": total_distance_with_detours,
+            "distance_with_detours_miles": distance_miles + total_detour_miles,
             "duration_hours": round(float(route_info.get("duration_seconds", 0.0)) / 3600.0, 2),
             "total_gallons": total_purchased_gallons,
             "total_fuel_consumed": total_fuel_consumed,
@@ -345,3 +235,39 @@ def plan_route(request):
         return JsonResponse({"error": f"Planning failed: {e}"}, status=500)
 
     return JsonResponse(plan)
+
+
+@csrf_exempt
+def route_through_stops(request):
+    """Lightweight endpoint: given a list of [lon, lat] waypoints, return
+    the Geoapify multi-waypoint route geometry. Used by the frontend to
+    progressively load the detour polyline after the main plan is shown."""
+    if request.method != "POST":
+        return JsonResponse({"error": "POST required"}, status=405)
+    try:
+        body = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return JsonResponse({"error": "Invalid JSON body"}, status=400)
+
+    waypoints = body.get("waypoints")
+    if not waypoints or not isinstance(waypoints, list) or len(waypoints) < 2:
+        return JsonResponse({"error": "waypoints must be a list of at least 2 [lon, lat] pairs"}, status=400)
+
+    try:
+        logger.debug("route_through_stops: routing %d waypoints ...", len(waypoints))
+        t0 = time.perf_counter()
+        result = route_directions(waypoints)
+        logger.debug("route_through_stops: done in %.2fs", time.perf_counter() - t0)
+    except Exception as e:
+        logger.exception("route_through_stops failed: %s", e)
+        return JsonResponse({"error": f"Routing failed: {e}"}, status=502)
+
+    # Normalise duration into duration_seconds
+    if isinstance(result, dict):
+        try:
+            d_s = float(result.get("duration", 0.0) or 0.0)
+        except Exception:
+            d_s = 0.0
+        result["duration_seconds"] = d_s
+
+    return JsonResponse({"route": result})

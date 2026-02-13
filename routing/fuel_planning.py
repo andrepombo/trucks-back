@@ -109,7 +109,9 @@ class SimpleFuelPlanner:
         first_stop_done = False
 
         while current_mile + remaining_range + 1e-6 < total_distance_miles:
-            # How far we can get from here with a full tank
+            # How far we can get from here with current fuel
+            fuel_reach = current_mile + remaining_range
+            # How far we could get if we had a full tank
             max_reach = min(current_mile + max_range, total_distance_miles)
 
             # Filter candidates we can physically reach from current_mile
@@ -123,7 +125,7 @@ class SimpleFuelPlanner:
                 # Cannot reach any station, give up
                 raise RuntimeError("No reachable fuel station found along the route within range.")
 
-            # For the very first stop when starting empty, allow a 10-mile radius
+            # For the very first stop when starting empty, allow a radius
             # around origin; otherwise, just use corridor candidates.
             if not first_stop_done and start_empty:
                 in_radius = [
@@ -135,9 +137,51 @@ class SimpleFuelPlanner:
             else:
                 pool = reachable
 
-            # Choose the cheapest station in the pool
+            # Sort by price (cheapest first)
             pool.sort(key=lambda c: c["price"])
-            chosen = pool[0]
+
+            # Pre-filter: skip stations where we'd buy less than
+            # MIN_GALLONS_PER_STOP, unless:
+            #   - it's the only reachable station (safety),
+            #   - remaining distance to destination is small enough that
+            #     we genuinely need less than min_gallons_per_stop, or
+            #   - we can't reach any "worthy" station with current fuel.
+            min_purchase_miles = min_gallons_per_stop * mpg if min_gallons_per_stop > 0 else 0.0
+            chosen = None
+            for c in pool:
+                dist_to_c = max(0.0, c["mile_on_route"] - current_mile)
+                range_after_driving = remaining_range - dist_to_c
+                dist_left_at_c = max(0.0, total_distance_miles - c["mile_on_route"])
+                target_range_at_c = min(max_range, dist_left_at_c)
+                need_miles_at_c = max(0.0, target_range_at_c - max(0.0, range_after_driving))
+                gallons_at_c = need_miles_at_c / mpg if mpg > 0 else 0.0
+
+                # If remaining distance is small, any purchase amount is fine
+                # (this is effectively the "last stop" exception).
+                if dist_left_at_c <= min_purchase_miles + 1e-6:
+                    chosen = c
+                    break
+
+                # Accept this station if we'd buy at least min_gallons_per_stop
+                if gallons_at_c >= min_gallons_per_stop - 1e-6:
+                    chosen = c
+                    break
+
+            # Fallback: if no station meets the minimum purchase threshold,
+            # pick the farthest reachable station (to delay stopping and
+            # accumulate more need). This avoids tiny top-ups.
+            if chosen is None:
+                # Among stations we can actually reach with current fuel,
+                # pick the farthest one; otherwise just take the cheapest.
+                reachable_now = [
+                    c for c in pool
+                    if c["mile_on_route"] <= fuel_reach + 1e-6
+                ]
+                if reachable_now:
+                    chosen = max(reachable_now, key=lambda c: c["mile_on_route"])
+                else:
+                    # We need fuel to reach any station; pick cheapest
+                    chosen = pool[0]
 
             # Drive there
             dist_to_stop = max(0.0, chosen["mile_on_route"] - current_mile)
@@ -155,24 +199,23 @@ class SimpleFuelPlanner:
             remaining_range -= dist_to_stop
             current_mile = chosen["mile_on_route"]
 
-            # Decide how much to buy at this stop: either fill full or enough to reach destination,
-            # but never less than MIN_GALLONS_PER_STOP (unless we need less to finish trip).
+            # Decide how much to buy at this stop: fill to max_range or
+            # enough to reach destination, whichever is smaller.
             dist_left = max(0.0, total_distance_miles - current_mile)
             target_range = min(max_range, dist_left)
             need_miles = max(0.0, target_range - remaining_range)
             gallons_here = need_miles / mpg if mpg > 0 else 0.0
 
-            if min_gallons_per_stop > 0 and dist_left > 0:
-                # Convert min gallons to miles; we will buy at least this many gallons
-                # unless the remaining distance is so small that we need less.
-                min_miles_here = min_gallons_per_stop * mpg
-                # If we are far from destination, enforce minimum purchase.
-                if need_miles > 0 and need_miles < min_miles_here:
-                    extra_miles = min_miles_here - need_miles
-                    # Do not exceed max_range when adding extra fuel.
-                    if target_range + extra_miles <= max_range + 1e-6:
-                        need_miles += extra_miles
-                        gallons_here = need_miles / mpg if mpg > 0 else 0.0
+            # Enforce MIN_GALLONS_PER_STOP: if we'd buy less than the
+            # minimum but the tank can hold more, bump up to the minimum.
+            if min_gallons_per_stop > 0 and dist_left > min_purchase_miles:
+                if 0 < gallons_here < min_gallons_per_stop - 1e-6:
+                    # How many gallons can we actually add without exceeding
+                    # max_range (i.e. tank capacity)?
+                    max_addable_miles = max(0.0, max_range - remaining_range)
+                    max_addable_gallons = max_addable_miles / mpg if mpg > 0 else 0.0
+                    gallons_here = min(min_gallons_per_stop, max_addable_gallons)
+                    need_miles = gallons_here * mpg
             cost_here = gallons_here * chosen["price"]
 
             total_purchased_gallons += gallons_here
