@@ -525,20 +525,18 @@ def _compute_initial_stop(
         add_miles_clamped = max_range_miles - remaining_miles
 
     remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
-    gallons_to_fill = max(0.0, add_miles_clamped / mpg)
-    max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
-    if max_tank_gallons < float("inf"):
-        gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
+    gallons_to_fill, total_after = _enforce_tank_capacity(
+        remaining_gallons_on_arrival=remaining_gallons_on_arrival,
+        add_miles_clamped=add_miles_clamped,
+        max_range_miles=max_range_miles,
+        mpg=mpg,
+    )
 
     cost_here = gallons_to_fill * init["price"]
     remaining_miles = min(max_range_miles, remaining_miles + add_miles_clamped)
 
     total_gallons += gallons_to_fill
     total_cost += cost_here
-
-    total_after = remaining_gallons_on_arrival + gallons_to_fill
-    if max_tank_gallons < float("inf"):
-        total_after = min(total_after, max_tank_gallons)
 
     stop_entry = {
         "station_id": init["id"],
@@ -651,17 +649,15 @@ def _decide_next_stop_purchase(
         add_miles_clamped = max_range_miles - remaining_miles
 
     remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
-    gallons_to_fill = max(0.0, add_miles_clamped / mpg)
-    max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
-    if max_tank_gallons < float("inf"):
-        gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
+    gallons_to_fill, total_after = _enforce_tank_capacity(
+        remaining_gallons_on_arrival=remaining_gallons_on_arrival,
+        add_miles_clamped=add_miles_clamped,
+        max_range_miles=max_range_miles,
+        mpg=mpg,
+    )
 
     cost_here = gallons_to_fill * candidate["price"]
     remaining_miles = min(max_range_miles, remaining_miles + add_miles_clamped)
-
-    total_after = remaining_gallons_on_arrival + gallons_to_fill
-    if max_tank_gallons < float("inf"):
-        total_after = min(total_after, max_tank_gallons)
 
     stop_entry = {
         "station_id": candidate["id"],
@@ -715,6 +711,23 @@ def _apply_micro_stop_elimination(
                 add_miles_clamped = min(max_range_miles - remaining_miles, add_miles_clamped + shortfall)
 
     return add_miles_clamped
+
+
+def _enforce_tank_capacity(
+    *,
+    remaining_gallons_on_arrival: float,
+    add_miles_clamped: float,
+    max_range_miles: float,
+    mpg: float,
+) -> Tuple[float, float]:
+    gallons_to_fill = max(0.0, add_miles_clamped / mpg)
+    max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
+    if max_tank_gallons < float("inf"):
+        gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
+        total_after = min(remaining_gallons_on_arrival + gallons_to_fill, max_tank_gallons)
+    else:
+        total_after = remaining_gallons_on_arrival + gallons_to_fill
+    return gallons_to_fill, total_after
 
 
 def _estimate_route_states(
