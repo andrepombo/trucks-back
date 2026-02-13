@@ -100,12 +100,12 @@ def plan_route(request):
         route_info = plan.get("route", {})
         fuel_info = plan.get("fuel", {})
         distance_miles = float(route_info.get("distance_miles", 0.0))
-        mpg_used = float(fuel_info.get("mpg", 1.0) or 1.0)
-        total_gallons_purchased = float(fuel_info.get("total_gallons", 0.0))
-        total_consumed = distance_miles / mpg_used
-        start_empty_flag = bool(fuel_info.get("start_empty"))
-        initial_fuel = 0.0 if start_empty_flag else float(fuel_info.get("max_range_miles", 0.0)) / mpg_used
-        ending_fuel = initial_fuel + total_gallons_purchased - total_consumed
+
+        # New fuel accounting from SimpleFuelPlanner
+        total_fuel_consumed = float(fuel_info.get("total_fuel_consumed", 0.0) or 0.0)
+        total_purchased_gallons = float(fuel_info.get("total_purchased_gallons", 0.0) or 0.0)
+        trip_fuel_cost = float(fuel_info.get("trip_fuel_cost", 0.0) or 0.0)
+        ending_fuel = float(fuel_info.get("ending_fuel_gallons", 0.0) or 0.0)
         total_detour_miles = sum(float(s.get("detour_miles", 0.0) or 0.0) for s in stops)
         total_distance_with_detours = distance_miles + total_detour_miles
 
@@ -116,9 +116,9 @@ def plan_route(request):
             "total_detour_miles": total_detour_miles,
             "distance_with_detours_miles": total_distance_with_detours,
             "duration_hours": round(float(route_info.get("duration_seconds", 0.0)) / 3600.0, 2),
-            "total_gallons": total_gallons_purchased,
-            "total_fuel_consumed": total_consumed,
-            "total_cost": float(fuel_info.get("total_cost", 0.0)),
+            "total_gallons": total_purchased_gallons,
+            "total_fuel_consumed": total_fuel_consumed,
+            "total_cost": trip_fuel_cost,
             "ending_fuel_gallons": ending_fuel,
             "stops_count": len(stops),
         }
@@ -151,14 +151,14 @@ def plan_route(request):
             float(summ.get("distance_miles", 0.0)),
             float(summ.get("duration_hours", 0.0)),
             int(summ.get("stops_count", 0)),
-            float(summ.get("total_gallons", 0.0)),
+            float(summ.get("total_fuel_consumed", 0.0)),
             float(summ.get("total_cost", 0.0)),
         )
         logger.debug(
             "Planning complete in %.2fs: %d stops, total_cost=$%.2f",
             time.perf_counter() - t2,
             len(plan.get("stops", [])),
-            plan.get("fuel", {}).get("total_cost", 0.0),
+            plan.get("fuel", {}).get("trip_fuel_cost", 0.0),
         )
     except Exception as e:
         logger.exception("Planning failed: %s", e)
