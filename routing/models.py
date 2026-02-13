@@ -15,6 +15,7 @@ class Station(models.Model):
     class Meta:
         indexes = [
             models.Index(fields=["state", "price"]),
+            models.Index(fields=["lon", "lat"]),
         ]
 
     def __str__(self) -> str:

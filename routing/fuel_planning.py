@@ -1,11 +1,42 @@
 from __future__ import annotations
 
-from typing import Dict, List
+import bisect
+import logging
+import math
+import time
+from typing import Dict, List, Tuple
 
 from django.conf import settings
 
 from .utils import cumulative_distances_miles, project_point_onto_polyline_miles
 from .models import Station
+
+logger = logging.getLogger("routing")
+
+
+def _route_bbox(coords: List[List[float]], margin_deg: float) -> Tuple[float, float, float, float]:
+    """Return (min_lon, min_lat, max_lon, max_lat) with a margin in degrees."""
+    lons = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    return (
+        min(lons) - margin_deg,
+        min(lats) - margin_deg,
+        max(lons) + margin_deg,
+        max(lats) + margin_deg,
+    )
+
+
+def _downsample(coords: List[List[float]], cum: List[float], max_pts: int):
+    """Return (sampled_coords, sampled_cum) with at most max_pts vertices,
+    always keeping the first and last point."""
+    n = len(coords)
+    if n <= max_pts:
+        return coords, cum
+    step = max(1, (n - 1) // (max_pts - 1))
+    indices = list(range(0, n, step))
+    if indices[-1] != n - 1:
+        indices.append(n - 1)
+    return [coords[i] for i in indices], [cum[i] for i in indices]
 
 
 class SimpleFuelPlanner:
@@ -53,21 +84,39 @@ class SimpleFuelPlanner:
             getattr(settings, "INITIAL_STOP_RADIUS_MILES", 5.0) or 5.0
         )
 
-        # Project all stations and build corridor candidates
+        # ── Performance: bounding-box pre-filter ──────────────────────
+        # Convert corridor_limit miles to approximate degrees (~1° ≈ 69 mi)
+        margin_deg = corridor_limit / 69.0 + 0.15  # generous margin
+        bbox = _route_bbox(coords, margin_deg)
+
+        # ── Performance: downsample polyline for projection ───────────
+        # For long routes the polyline can have thousands of vertices.
+        # Station projection is O(stations × vertices), so cap vertices.
+        MAX_PROJ_PTS = 400
+        proj_coords, proj_cum = _downsample(coords, cum, MAX_PROJ_PTS)
+
+        # Project stations and build corridor candidates
         origin_lon, origin_lat = coords[0]
         candidates = []
-        for s in Station.objects.all():
-            if s.lon is None or s.lat is None:
-                continue
+        t_proj_start = time.perf_counter()
+
+        # Fetch only stations inside the bounding box from the DB
+        qs = Station.objects.filter(
+            lon__isnull=False, lat__isnull=False,
+            lon__gte=bbox[0], lon__lte=bbox[2],
+            lat__gte=bbox[1], lat__lte=bbox[3],
+        )
+        bbox_count = 0
+        for s in qs.iterator():
+            bbox_count += 1
             lon = float(s.lon)
             lat = float(s.lat)
             try:
                 mile_on_route, detour_miles = project_point_onto_polyline_miles(
-                    coords, cum, [lon, lat]
+                    proj_coords, proj_cum, [lon, lat]
                 )
             except Exception:
                 continue
-            # Hard 10-mile corridor off the polyline
             if detour_miles > corridor_limit:
                 continue
             candidates.append(
@@ -81,8 +130,16 @@ class SimpleFuelPlanner:
                 }
             )
 
+        logger.debug(
+            "Station projection: %d in bbox → %d in corridor (%.2fs, polyline pts=%d)",
+            bbox_count, len(candidates),
+            time.perf_counter() - t_proj_start, len(proj_coords),
+        )
+
         # Sort by position along the route
         candidates.sort(key=lambda c: c["mile_on_route"])
+        # Pre-compute sorted mile markers for bisect lookups in the planner loop
+        candidate_miles = [c["mile_on_route"] for c in candidates]
 
         mpg = self.mpg
         max_range = self.max_range_miles
@@ -99,8 +156,6 @@ class SimpleFuelPlanner:
 
         # Helper to compute straight-line distance from origin (for first stop radius)
         def _distance_from_origin(lon: float, lat: float) -> float:
-            import math
-
             rad = math.pi / 180.0
             x = (lon - origin_lon) * math.cos((lat + origin_lat) * 0.5 * rad)
             y = (lat - origin_lat)
@@ -115,11 +170,10 @@ class SimpleFuelPlanner:
             max_reach = min(current_mile + max_range, total_distance_miles)
 
             # Filter candidates we can physically reach from current_mile
-            reachable = [
-                c
-                for c in candidates
-                if current_mile + 1e-6 < c["mile_on_route"] <= max_reach + 1e-6
-            ]
+            # Use bisect for O(log N) range lookup instead of scanning all candidates
+            lo_idx = bisect.bisect_right(candidate_miles, current_mile + 1e-6)
+            hi_idx = bisect.bisect_right(candidate_miles, max_reach + 1e-6)
+            reachable = candidates[lo_idx:hi_idx]
 
             if not reachable:
                 # Cannot reach any station, give up
