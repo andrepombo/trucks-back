@@ -256,97 +256,32 @@ def plan_stops_and_costs(
         remaining_miles -= dist_to_stop
         current_mile = candidate["mile_on_route"]
 
-        # Decide how much to buy: price-aware fueling
-        reach_from_here = min(current_mile + max_range_miles, total_distance_miles)
-        next_best = _find_candidate_stop(
+        (
+            remaining_miles,
+            gallons_to_fill,
+            cost_here,
+            stop_entry,
+        ) = _decide_next_stop_purchase(
             current_mile=current_mile,
-            reach_mile=reach_from_here,
-            target_mile=min(current_mile + settings.LEG_TARGET_MILES, total_distance_miles),
-            coords=proj_coords,
-            cum=proj_cum,
+            remaining_miles=remaining_miles,
+            candidate=candidate,
+            total_distance_miles=total_distance_miles,
+            target_stop_count=target_stop_count,
+            max_range_miles=max_range_miles,
+            mpg=mpg,
+            proj_coords=proj_coords,
+            proj_cum=proj_cum,
+            coords=coords,
+            cum=cum,
             state_index=state_index,
             projected_cache=projected_cache,
             geocode_station_func=geocode_station_func,
             state_samples=state_samples,
-            widen_search=True,
+            selected_stops_count=len(selected_stops),
         )
-        dist_left = max(0.0, total_distance_miles - current_mile)
-        stops_left_allowed = max(0, target_stop_count - len(selected_stops))
-        force_finish = stops_left_allowed <= 1
-        base_need_miles_for_stop = 0.0
-        if dist_left <= max_range_miles + 1e-6:
-            need_miles = dist_left
-        elif force_finish:
-            need_miles = dist_left
-        elif next_best and next_best.get("price", float("inf")) < candidate.get("price", float("inf")):
-            goal_mile = min(float(next_best.get("mile_on_route", current_mile)), total_distance_miles)
-            base_need_miles_for_stop = max(0.0, goal_mile - current_mile)
-            need_miles = base_need_miles_for_stop
-        else:
-            # No cheaper ahead within reach: buy enough to reach destination if possible, else fill
-            if dist_left <= max_range_miles + 1e-6:
-                need_miles = dist_left
-            else:
-                need_miles = max_range_miles
-        add_miles = max(0.0, need_miles - remaining_miles)
-        # Clamp to tank capacity only; do not force top-off to avoid overbuying
-        add_miles_clamped = min(add_miles, max_range_miles - remaining_miles)
-        min_gallons_cfg = float(getattr(settings, "MIN_GALLONS_PER_STOP", 0.0) or 0.0)
-        if min_gallons_cfg > 0.0:
-            dist_left_now = max(0.0, total_distance_miles - current_mile)
-            finishes_trip = (remaining_miles + add_miles_clamped) >= (dist_left_now - 1e-6)
-            if not finishes_trip:
-                min_add_miles = min(max_range_miles - remaining_miles, min_gallons_cfg * mpg)
-                if add_miles_clamped + 1e-9 < min_add_miles:
-                    add_miles_clamped = min_add_miles
-        # Prefer fewer stops overall: ensure remaining stops budget is feasible after this purchase
-        # Do not apply this heuristic when this is the last allowed stop (force_finish == True),
-        # otherwise we may overbuy near the destination just to satisfy reserve miles accounting.
-        stops_left_allowed_after = max(0, (target_stop_count - len(selected_stops)) - 1)
-        def _stops_needed_after(purchase_miles: float) -> int:
-            potential_remaining = remaining_miles + purchase_miles
-            reachable = current_mile + potential_remaining
-            dist_left_after = max(0.0, total_distance_miles - reachable)
-            need_after = dist_left_after
-            if need_after <= 1e-6:
-                return 0
-            return int(math.ceil(need_after / max_range_miles))
-        if (not force_finish) and (_stops_needed_after(add_miles_clamped) > stops_left_allowed_after):
-            # Increase purchase up to tank capacity to reduce later stops
-            add_miles_clamped = max_range_miles - remaining_miles
-        remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
-        gallons_to_fill = max(0.0, add_miles_clamped / mpg)
-        # Never exceed physical tank capacity when purchasing fuel.
-        max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
-        if max_tank_gallons < float("inf"):
-            gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
-        cost_here = gallons_to_fill * candidate["price"]
-        # Fuel on arrival is whatever we had left after driving from previous point.
-        remaining_miles = remaining_miles + add_miles_clamped
 
         total_gallons += gallons_to_fill
         total_cost += cost_here
-
-        total_after = remaining_gallons_on_arrival + gallons_to_fill
-        if max_tank_gallons < float("inf"):
-            total_after = min(total_after, max_tank_gallons)
-
-        stop_entry = {
-            "station_id": candidate["id"],
-            "name": candidate["name"],
-            "address": candidate["address"],
-            "city": candidate["city"],
-            "state": candidate["state"],
-            "price": candidate["price"],
-            "lon": candidate["lon"],
-            "lat": candidate["lat"],
-            "mile_on_route": candidate["mile_on_route"],
-            "detour_miles": candidate["detour_miles"],
-            "remaining_gallons_on_arrival": remaining_gallons_on_arrival,
-            "gallons_purchased": gallons_to_fill,
-            "total_gallons_after_refuel": total_after,
-            "cost": cost_here,
-        }
         selected_stops.append(stop_entry)
 
     return {
@@ -564,24 +499,18 @@ def _compute_initial_stop(
             if add_miles_clamped + 1e-9 < min_add_miles:
                 add_miles_clamped = min_add_miles
 
-    micro_stops_left_allowed_after = max(0, (target_stop_count - len(selected_stops)) - 1)
-    if micro_stops_left_allowed_after == 0:
-        dist_left_now = max(0.0, total_distance_miles - current_mile)
-        planned_after = remaining_miles + add_miles_clamped
-        shortfall = max(0.0, dist_left_now - planned_after)
-        micro_cap = (min_gallons_cfg * mpg) if min_gallons_cfg > 0.0 else 0.0
-        if micro_cap > 0.0 and shortfall > 0.0 and shortfall <= micro_cap + 1e-6:
-            add_miles_clamped = min(max_range_miles - remaining_miles, add_miles_clamped + shortfall)
-
-    stops_left_allowed_after = max(0, target_stop_count - 1)
-    if stops_left_allowed_after == 0:
-        dist_left_now = max(0.0, total_distance_miles - current_mile)
-        planned_after = remaining_miles + add_miles_clamped
-        shortfall = max(0.0, dist_left_now - planned_after)
-        if shortfall > 0.0:
-            micro_cap = (min_gallons_cfg * mpg) if min_gallons_cfg > 0.0 else 0.0
-            if micro_cap > 0.0 and shortfall <= micro_cap + 1e-6:
-                add_miles_clamped = min(max_range_miles - remaining_miles, add_miles_clamped + shortfall)
+    add_miles_clamped = _apply_micro_stop_elimination(
+        current_mile=current_mile,
+        remaining_miles=remaining_miles,
+        add_miles_clamped=add_miles_clamped,
+        total_distance_miles=total_distance_miles,
+        max_range_miles=max_range_miles,
+        mpg=mpg,
+        min_gallons_cfg=min_gallons_cfg,
+        target_stop_count=target_stop_count,
+        selected_stops_count=len(selected_stops),
+        stops_left_allowed_after=max(0, target_stop_count - 1),
+    )
 
     def _stops_needed_after(purchase_miles: float) -> int:
         potential_remaining = remaining_miles + purchase_miles
@@ -631,6 +560,161 @@ def _compute_initial_stop(
     current_mile = float(init.get("mile_on_route", 0.0))
 
     return current_mile, remaining_miles, total_gallons, total_cost
+
+
+def _decide_next_stop_purchase(
+    *,
+    current_mile: float,
+    remaining_miles: float,
+    candidate: Dict,
+    total_distance_miles: float,
+    target_stop_count: int,
+    max_range_miles: float,
+    mpg: float,
+    proj_coords: List[List[float]],
+    proj_cum: List[float],
+    coords: List[List[float]],
+    cum: List[float],
+    state_index: Dict[str, List[Dict]],
+    projected_cache: Dict[str, Optional[Dict]],
+    geocode_station_func,
+    state_samples,
+    selected_stops_count: int,
+) -> Tuple[float, float, float, Dict]:
+    reach_from_here = min(current_mile + max_range_miles, total_distance_miles)
+    next_best = _find_candidate_stop(
+        current_mile=current_mile,
+        reach_mile=reach_from_here,
+        target_mile=min(current_mile + settings.LEG_TARGET_MILES, total_distance_miles),
+        coords=proj_coords,
+        cum=proj_cum,
+        state_index=state_index,
+        projected_cache=projected_cache,
+        geocode_station_func=geocode_station_func,
+        state_samples=state_samples,
+        widen_search=True,
+    )
+
+    dist_left = max(0.0, total_distance_miles - current_mile)
+    stops_left_allowed = max(0, target_stop_count - selected_stops_count)
+    force_finish = stops_left_allowed <= 1
+
+    if dist_left <= max_range_miles + 1e-6:
+        need_miles = dist_left
+    elif force_finish:
+        need_miles = dist_left
+    elif next_best and next_best.get("price", float("inf")) < candidate.get("price", float("inf")):
+        goal_mile = min(float(next_best.get("mile_on_route", current_mile)), total_distance_miles)
+        need_miles = max(0.0, goal_mile - current_mile)
+    else:
+        if dist_left <= max_range_miles + 1e-6:
+            need_miles = dist_left
+        else:
+            need_miles = max_range_miles
+
+    add_miles = max(0.0, need_miles - remaining_miles)
+    add_miles_clamped = min(add_miles, max_range_miles - remaining_miles)
+
+    min_gallons_cfg = float(getattr(settings, "MIN_GALLONS_PER_STOP", 0.0) or 0.0)
+    if min_gallons_cfg > 0.0:
+        dist_left_now = max(0.0, total_distance_miles - current_mile)
+        finishes_trip = (remaining_miles + add_miles_clamped) >= (dist_left_now - 1e-6)
+        if not finishes_trip:
+            min_add_miles = min(max_range_miles - remaining_miles, min_gallons_cfg * mpg)
+            if add_miles_clamped + 1e-9 < min_add_miles:
+                add_miles_clamped = min_add_miles
+
+    stops_left_allowed_after = max(0, stops_left_allowed - 1)
+
+    add_miles_clamped = _apply_micro_stop_elimination(
+        current_mile=current_mile,
+        remaining_miles=remaining_miles,
+        add_miles_clamped=add_miles_clamped,
+        total_distance_miles=total_distance_miles,
+        max_range_miles=max_range_miles,
+        mpg=mpg,
+        min_gallons_cfg=min_gallons_cfg,
+        target_stop_count=target_stop_count,
+        selected_stops_count=selected_stops_count,
+        stops_left_allowed_after=stops_left_allowed_after,
+    )
+
+    def _stops_needed_after(purchase_miles: float) -> int:
+        potential_remaining = remaining_miles + purchase_miles
+        reachable = current_mile + potential_remaining
+        dist_left_after = max(0.0, total_distance_miles - reachable)
+        if dist_left_after <= 1e-6:
+            return 0
+        return int(math.ceil(dist_left_after / max_range_miles))
+
+    if (not force_finish) and (_stops_needed_after(add_miles_clamped) > stops_left_allowed_after):
+        add_miles_clamped = max_range_miles - remaining_miles
+
+    remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
+    gallons_to_fill = max(0.0, add_miles_clamped / mpg)
+    max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
+    if max_tank_gallons < float("inf"):
+        gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
+
+    cost_here = gallons_to_fill * candidate["price"]
+    remaining_miles = min(max_range_miles, remaining_miles + add_miles_clamped)
+
+    total_after = remaining_gallons_on_arrival + gallons_to_fill
+    if max_tank_gallons < float("inf"):
+        total_after = min(total_after, max_tank_gallons)
+
+    stop_entry = {
+        "station_id": candidate["id"],
+        "name": candidate["name"],
+        "address": candidate["address"],
+        "city": candidate["city"],
+        "state": candidate["state"],
+        "price": candidate["price"],
+        "lon": candidate["lon"],
+        "lat": candidate["lat"],
+        "mile_on_route": candidate["mile_on_route"],
+        "detour_miles": candidate["detour_miles"],
+        "remaining_gallons_on_arrival": remaining_gallons_on_arrival,
+        "gallons_purchased": gallons_to_fill,
+        "total_gallons_after_refuel": total_after,
+        "cost": cost_here,
+    }
+
+    return remaining_miles, gallons_to_fill, cost_here, stop_entry
+
+
+def _apply_micro_stop_elimination(
+    *,
+    current_mile: float,
+    remaining_miles: float,
+    add_miles_clamped: float,
+    total_distance_miles: float,
+    max_range_miles: float,
+    mpg: float,
+    min_gallons_cfg: float,
+    target_stop_count: int,
+    selected_stops_count: int,
+    stops_left_allowed_after: int,
+) -> float:
+    micro_stops_left_allowed_after = max(0, (target_stop_count - selected_stops_count) - 1)
+    if micro_stops_left_allowed_after == 0:
+        dist_left_now = max(0.0, total_distance_miles - current_mile)
+        planned_after = remaining_miles + add_miles_clamped
+        shortfall = max(0.0, dist_left_now - planned_after)
+        micro_cap = (min_gallons_cfg * mpg) if min_gallons_cfg > 0.0 else 0.0
+        if micro_cap > 0.0 and shortfall > 0.0 and shortfall <= micro_cap + 1e-6:
+            add_miles_clamped = min(max_range_miles - remaining_miles, add_miles_clamped + shortfall)
+
+    if stops_left_allowed_after == 0:
+        dist_left_now = max(0.0, total_distance_miles - current_mile)
+        planned_after = remaining_miles + add_miles_clamped
+        shortfall = max(0.0, dist_left_now - planned_after)
+        if shortfall > 0.0:
+            micro_cap = (min_gallons_cfg * mpg) if min_gallons_cfg > 0.0 else 0.0
+            if micro_cap > 0.0 and shortfall <= micro_cap + 1e-6:
+                add_miles_clamped = min(max_range_miles - remaining_miles, add_miles_clamped + shortfall)
+
+    return add_miles_clamped
 
 
 def _estimate_route_states(
