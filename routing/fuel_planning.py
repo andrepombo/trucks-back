@@ -255,6 +255,14 @@ class FuelPlanner:
             "cost": cost_here,
             "is_pre_trip": True,
         }
+        baseline_ctx = init.get("_baseline_candidate")
+        if baseline_ctx:
+            stop_entry["baseline_candidate"] = baseline_ctx
+        self._attach_economics(
+            stop_entry=stop_entry,
+            station=init,
+            gallons_purchased=gallons_to_fill,
+        )
         selected_stops.append(stop_entry)
 
         current_mile = float(init.get("mile_on_route", 0.0))
@@ -366,6 +374,14 @@ class FuelPlanner:
             "total_gallons_after_refuel": total_after,
             "cost": cost_here,
         }
+        baseline_ctx = candidate.get("_baseline_candidate")
+        if baseline_ctx:
+            stop_entry["baseline_candidate"] = baseline_ctx
+        self._attach_economics(
+            stop_entry=stop_entry,
+            station=candidate,
+            gallons_purchased=gallons_to_fill,
+        )
 
         return remaining_miles, gallons_to_fill, cost_here, stop_entry
 
@@ -415,6 +431,59 @@ class FuelPlanner:
                 add_miles_clamped = min(self.max_range_miles - remaining_miles, add_miles_clamped + shortfall)
 
         return add_miles_clamped
+
+    def _attach_economics(
+        self,
+        *,
+        stop_entry: Dict,
+        station: Dict,
+        gallons_purchased: float,
+    ) -> None:
+        detour_miles = float(stop_entry.get("detour_miles", 0.0) or 0.0)
+        price = float(stop_entry.get("price", station.get("price", 0.0)) or 0.0)
+
+        # Fuel burned on the detour
+        detour_gallons = detour_miles / self.mpg if self.mpg > 0 else 0.0
+        detour_fuel_cost = detour_gallons * price
+
+        # Time cost for the detour
+        speed = float(getattr(settings, "DETOUR_ECON_SPEED_MPH", 50.0) or 50.0)
+        time_cost_rate = float(
+            getattr(settings, "DETOUR_ECON_TIME_COST_PER_HOUR", 55.0) or 55.0
+        )
+        hours = detour_miles / speed if speed > 0 else 0.0
+        time_cost = hours * time_cost_rate
+
+        # Extra wear cost
+        wear_rate = float(
+            getattr(settings, "DETOUR_ECON_EXTRA_WEAR_COST_PER_MILE", 0.2) or 0.2
+        )
+        wear_cost = detour_miles * wear_rate
+
+        # Savings vs a baseline candidate, if present
+        baseline = stop_entry.get("baseline_candidate") or {}
+        baseline_price = float(baseline.get("price", price) or price)
+        price_diff = baseline_price - price
+        price_saving = price_diff * gallons_purchased
+
+        total_detour_cost = detour_fuel_cost + time_cost + wear_cost
+        net_saving = price_saving - total_detour_cost
+
+        stop_entry["economics"] = {
+            "detour_miles": detour_miles,
+            "detour_fuel_gallons": detour_gallons,
+            "detour_fuel_cost": detour_fuel_cost,
+            "detour_time_hours": hours,
+            "detour_time_cost": time_cost,
+            "detour_wear_cost": wear_cost,
+            "total_detour_cost": total_detour_cost,
+            "baseline_price": baseline_price,
+            "actual_price": price,
+            "price_diff_per_gallon": price_diff,
+            "gallons_purchased": gallons_purchased,
+            "gross_price_saving": price_saving,
+            "net_saving": net_saving,
+        }
 
     def _enforce_tank_capacity(
         self,

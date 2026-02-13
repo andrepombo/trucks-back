@@ -418,6 +418,10 @@ def _find_candidate_stop(
         max_states = min(7, len(prioritize)) if not widen_search else min(12, len(prioritize))
 
     best: Optional[Dict] = None
+    # Track the best low-detour candidate within the same reach window.
+    # This is used as a realistic "easy" baseline alternative to the chosen stop.
+    best_low_detour: Optional[Dict] = None
+    low_detour_limit = float(getattr(settings, "DETOUR_LOW_THRESHOLD_MILES", 6.0))
     nearest_cheaper: Optional[Dict] = None
     farthest: Optional[Dict] = None
     nearest: Optional[Dict] = None
@@ -504,6 +508,21 @@ def _find_candidate_stop(
             tried += 1
             if proj is None:
                 continue
+            if proj.get("detour_miles") is not None:
+                detour_val = float(proj.get("detour_miles", 0.0) or 0.0)
+                # Track the best low-detour option inside the same reach window as a baseline
+                if (
+                    current_mile + 1e-6 < proj["mile_on_route"] <= reach_mile + 1e-6
+                    and detour_val <= low_detour_limit
+                ):
+                    if (best_low_detour is None) or (
+                        detour_val < float(best_low_detour.get("detour_miles", float("inf")))
+                        or (
+                            math.isclose(detour_val, float(best_low_detour.get("detour_miles", float("inf"))), rel_tol=1e-3, abs_tol=1e-3)
+                            and float(proj.get("price", float("inf"))) < float(best_low_detour.get("price", float("inf")))
+                        )
+                    ):
+                        best_low_detour = proj
             # Accept if within reachable window and detour under threshold
             if widen_search and disable_city_prefilter:
                 detour_limit = float(getattr(settings, "DETOUR_LIMIT_FALLBACK_MILES", 35.0))
@@ -538,10 +557,45 @@ def _find_candidate_stop(
                 if (nearest is None) or (proj["mile_on_route"] < nearest["mile_on_route"]):
                     nearest = proj
     if prefer_farthest and farthest is not None:
-        return farthest
-    if prefer_nearest and nearest is not None:
-        return nearest
-    return nearest_cheaper if nearest_cheaper is not None else best
+        chosen = farthest
+    elif prefer_nearest and nearest is not None:
+        chosen = nearest
+    else:
+        chosen = nearest_cheaper if nearest_cheaper is not None else best
+    if chosen is None:
+        return None
+
+    baseline_ctx: Optional[Dict] = None
+    # Use best_low_detour only if it is strictly easier (lower detour) than the chosen stop
+    # and lies within the same search window. Otherwise, fall back to treating the
+    # chosen station itself as the baseline (no better easy option).
+    try:
+        chosen_detour = float(chosen.get("detour_miles", float("inf")) or float("inf"))
+    except Exception:
+        chosen_detour = float("inf")
+
+    if (
+        best_low_detour is not None
+        and best_low_detour is not chosen
+        and float(best_low_detour.get("detour_miles", float("inf")) or float("inf")) + 1e-6 < chosen_detour
+        and current_mile + 1e-6 < float(best_low_detour.get("mile_on_route", -1e9)) <= reach_mile + 1e-6
+    ):
+        try:
+            baseline_ctx = {
+                "station_id": best_low_detour.get("id"),
+                "name": best_low_detour.get("name"),
+                "city": best_low_detour.get("city"),
+                "state": best_low_detour.get("state"),
+                "price": float(best_low_detour.get("price", 0.0) or 0.0),
+                "detour_miles": float(best_low_detour.get("detour_miles", 0.0) or 0.0),
+            }
+        except Exception:
+            baseline_ctx = None
+
+    enriched = dict(chosen)
+    if baseline_ctx is not None:
+        enriched["_baseline_candidate"] = baseline_ctx
+    return enriched
 
 
 def _find_initial_fuel_stop(
@@ -581,6 +635,8 @@ def _find_initial_fuel_stop(
     detours = [15.0, 25.0, 40.0]
 
     best: Optional[Dict] = None
+    best_low_detour: Optional[Dict] = None
+    low_detour_limit = float(getattr(settings, "DETOUR_LOW_THRESHOLD_MILES", 6.0))
 
     for win_miles, detour_limit in zip(windows, detours):
         for st in prioritize[:8]:
@@ -625,7 +681,19 @@ def _find_initial_fuel_stop(
 
                 if proj is None:
                     continue
-                # Accept if near start and small detour
+                # Track a low-detour baseline near the start window
+                if proj.get("detour_miles") is not None:
+                    detour_val = float(proj.get("detour_miles", 0.0) or 0.0)
+                    if detour_val <= low_detour_limit and proj["mile_on_route"] <= win_miles:
+                        if (best_low_detour is None) or (
+                            detour_val < float(best_low_detour.get("detour_miles", float("inf")))
+                            or (
+                                math.isclose(detour_val, float(best_low_detour.get("detour_miles", float("inf"))), rel_tol=1e-3, abs_tol=1e-3)
+                                and float(proj.get("price", float("inf"))) < float(best_low_detour.get("price", float("inf")))
+                            )
+                        ):
+                            best_low_detour = proj
+
                 if proj["mile_on_route"] <= win_miles and proj["detour_miles"] <= detour_limit:
                     if best is None:
                         best = proj
@@ -638,4 +706,37 @@ def _find_initial_fuel_stop(
                             best = proj
         if best is not None:
             break
-    return best
+    if best is None:
+        return None
+
+    # For the very first stop, use a low-detour candidate near the start as baseline
+    # only if it is strictly easier than the chosen stop. Otherwise, treat the chosen
+    # station itself as the baseline.
+    baseline_ctx: Optional[Dict] = None
+    try:
+        chosen_detour = float(best.get("detour_miles", float("inf")) or float("inf"))
+    except Exception:
+        chosen_detour = float("inf")
+
+    if (
+        best_low_detour is not None
+        and best_low_detour is not best
+        and float(best_low_detour.get("detour_miles", float("inf")) or float("inf")) + 1e-6 < chosen_detour
+        and float(best_low_detour.get("mile_on_route", 0.0) or 0.0) <= max(windows)
+    ):
+        try:
+            baseline_ctx = {
+                "station_id": best_low_detour.get("id"),
+                "name": best_low_detour.get("name"),
+                "city": best_low_detour.get("city"),
+                "state": best_low_detour.get("state"),
+                "price": float(best_low_detour.get("price", 0.0) or 0.0),
+                "detour_miles": float(best_low_detour.get("detour_miles", 0.0) or 0.0),
+            }
+        except Exception:
+            baseline_ctx = None
+
+    result = dict(best)
+    if baseline_ctx is not None:
+        result["_baseline_candidate"] = baseline_ctx
+    return result
