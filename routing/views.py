@@ -39,8 +39,6 @@ def plan_route(request):
 
     mpg = float(body.get("mpg", settings.MPG))
     max_range = float(body.get("max_range_miles", settings.MAX_RANGE_MILES))
-    reserve_gallons = float(body.get("reserve_gallons", getattr(settings, "RESERVE_GALLONS", 0)))
-    first_stop_emergency_gallons = float(body.get("first_stop_emergency_gallons", 0.0))
 
     logger.debug(
         "/api/plan-route: start='%s' finish='%s' mpg=%.2f max_range=%.1f",
@@ -96,8 +94,6 @@ def plan_route(request):
             geocode_state_func=reverse_geocode_state_code,
             geocode_station_func=geocode_station_with_cache,
             start_empty=bool(body.get("start_empty")),
-            reserve_gallons=reserve_gallons,
-            first_stop_emergency_gallons=first_stop_emergency_gallons,
         )
         # Add a concise summary to make the response easier to consume
         stops = plan.get("stops", [])
