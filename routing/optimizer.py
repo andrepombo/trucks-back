@@ -283,6 +283,8 @@ def plan_stops_and_costs(
         if _stops_needed_after(add_miles_clamped) > stops_left_allowed_after:
             add_miles_clamped = max_range_miles - remaining_miles
         buy_gallons = add_miles_clamped / mpg
+        # At the initial pre-trip stop we conceptually arrive with 0 fuel if start_empty.
+        remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
         remaining_miles = remaining_miles + add_miles_clamped
         cost_here = buy_gallons * init["price"]
         total_gallons += buy_gallons
@@ -302,6 +304,7 @@ def plan_stops_and_costs(
                 "detour_miles": init.get("detour_miles", 0.0),
                 "is_pre_trip": True,
                 "gallons_purchased": buy_gallons,
+                "remaining_gallons_on_arrival": remaining_gallons_on_arrival,
                 "cost": cost_here,
             }
         )
@@ -527,12 +530,22 @@ def plan_stops_and_costs(
         if (not force_finish) and (_stops_needed_after(add_miles_clamped) > stops_left_allowed_after):
             # Increase purchase up to tank capacity to reduce later stops
             add_miles_clamped = max_range_miles - remaining_miles
-        gallons_to_fill = add_miles_clamped / mpg
+        gallons_to_fill = max(0.0, add_miles_clamped / mpg)
+        # Never exceed physical tank capacity when purchasing fuel.
+        max_tank_gallons = max_range_miles / mpg if mpg > 0 else float("inf")
+        if max_tank_gallons < float("inf"):
+            gallons_to_fill = min(gallons_to_fill, max(0.0, max_tank_gallons - remaining_gallons_on_arrival))
         cost_here = gallons_to_fill * candidate["price"]
+        # Fuel on arrival is whatever we had left after driving from previous point.
+        remaining_gallons_on_arrival = max(0.0, remaining_miles / mpg)
         remaining_miles = remaining_miles + add_miles_clamped
 
         total_gallons += gallons_to_fill
         total_cost += cost_here
+
+        total_after = remaining_gallons_on_arrival + gallons_to_fill
+        if max_tank_gallons < float("inf"):
+            total_after = min(total_after, max_tank_gallons)
 
         stop_entry = {
             "station_id": candidate["id"],
@@ -545,7 +558,9 @@ def plan_stops_and_costs(
             "lat": candidate["lat"],
             "mile_on_route": candidate["mile_on_route"],
             "detour_miles": candidate["detour_miles"],
+            "remaining_gallons_on_arrival": remaining_gallons_on_arrival,
             "gallons_purchased": gallons_to_fill,
+            "total_gallons_after_refuel": total_after,
             "cost": cost_here,
         }
         selected_stops.append(stop_entry)
